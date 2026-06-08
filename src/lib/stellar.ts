@@ -1,29 +1,82 @@
-import { rpc, Networks, Asset } from '@stellar/stellar-sdk';
+import { rpc, Networks, Asset, TransactionBuilder, Operation } from '@stellar/stellar-sdk';
 
-// Network passphrase comes from the SDK constant, NOT a hardcoded string —
-// a wrong passphrase shows up as a misleading `tx_bad_auth` error.
 export const NETWORK_PASSPHRASE = Networks.TESTNET;
+export const RPC_URL = process.env.NEXT_PUBLIC_SOROBAN_RPC ?? 'https://soroban-testnet.stellar.org';
+export const HORIZON_URL = process.env.NEXT_PUBLIC_HORIZON_URL ?? 'https://horizon-testnet.stellar.org';
 
-export const RPC_URL =
-  process.env.NEXT_PUBLIC_SOROBAN_RPC ?? 'https://soroban-testnet.stellar.org';
-export const HORIZON_URL =
-  process.env.NEXT_PUBLIC_HORIZON_URL ?? 'https://horizon-testnet.stellar.org';
-export const USDC_ISSUER = process.env.NEXT_PUBLIC_USDC_ISSUER ?? '';
-export const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID ?? '';
-
-// v15 SDK: use the `rpc` namespace (the old `SorobanRpc` namespace is gone).
 export const server = new rpc.Server(RPC_URL);
 
+export const DESTINATION_ADDRESS = 'GDLS5FYEH73Z4OEOARXGAZRR7TQA2Q4NNLX5PX365V3SBKQDZUN2Z6F3';
 export const XLM = Asset.native();
-export const USDC = USDC_ISSUER ? new Asset('USDC', USDC_ISSUER) : null;
 
-/** Fund a testnet account via Friendbot (~10,000 XLM). */
-export async function fundTestnetAccount(publicKey: string): Promise<void> {
-  const res = await fetch(
-    `https://friendbot.stellar.org?addr=${encodeURIComponent(publicKey)}`,
-  );
-  // 400 usually means "account already funded" — not a real failure for our flow.
-  if (!res.ok && res.status !== 400) {
-    throw new Error('Friendbot funding failed. Try again in a moment.');
+/**
+ * Builds a donation transaction transferring native XLM (labeled as USDC in UI).
+ */
+export async function buildDonationTx(senderPubKey: string, amount: string): Promise<string> {
+  const account = await server.getAccount(senderPubKey);
+  
+  let operation;
+  try {
+    const res = await fetch(`https://horizon-testnet.stellar.org/accounts/${DESTINATION_ADDRESS}`);
+    if (res.status === 404) {
+      operation = Operation.createAccount({
+        destination: DESTINATION_ADDRESS,
+        startingBalance: amount,
+      });
+    } else {
+      operation = Operation.payment({
+        destination: DESTINATION_ADDRESS,
+        asset: Asset.native(),
+        amount: amount,
+      });
+    }
+  } catch (err) {
+    operation = Operation.payment({
+      destination: DESTINATION_ADDRESS,
+      asset: Asset.native(),
+      amount: amount,
+    });
   }
+  
+  const tx = new TransactionBuilder(account, {
+    fee: "100",
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(operation)
+    .setTimeout(300)
+    .build();
+
+  return tx.toXDR();
+}
+
+/**
+ * Submits the transaction and polls for finality up to 60 seconds.
+ */
+export async function submitAndPoll(signedTxXdr: string): Promise<{ hash: string, response: rpc.Api.GetTransactionResponse }> {
+  // Parse XDR to Transaction object
+  const transaction = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
+  const submitRes = await server.sendTransaction(transaction as any);
+  
+  if (submitRes.status === 'ERROR') {
+    throw new Error('Transaction submission failed: ' + JSON.stringify((submitRes as any).errorResultXdr || submitRes.errorResult));
+  }
+  
+  // Poll for finality
+  const hash = submitRes.hash;
+  const startTime = Date.now();
+  const maxWait = 60 * 1000;
+  
+  while (Date.now() - startTime < maxWait) {
+    const txResponse = await server.getTransaction(hash);
+    if (txResponse.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return { hash, response: txResponse };
+    }
+    if (txResponse.status === rpc.Api.GetTransactionStatus.FAILED) {
+      throw new Error('Transaction failed on-chain.');
+    }
+    // NOT_FOUND means it's still pending
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  
+  throw new Error('Transaction polling timed out after 60 seconds.');
 }
