@@ -12,27 +12,27 @@ export const XLM = Asset.native();
 /**
  * Builds a donation transaction transferring native XLM (labeled as USDC in UI).
  */
-export async function buildDonationTx(senderPubKey: string, amount: string): Promise<string> {
+export async function buildDonationTx(senderPubKey: string, destPubKey: string, amount: string): Promise<string> {
   const account = await server.getAccount(senderPubKey);
   
   let operation;
   try {
-    const res = await fetch(`https://horizon-testnet.stellar.org/accounts/${DESTINATION_ADDRESS}`);
+    const res = await fetch(`https://horizon-testnet.stellar.org/accounts/${destPubKey}`);
     if (res.status === 404) {
       operation = Operation.createAccount({
-        destination: DESTINATION_ADDRESS,
+        destination: destPubKey,
         startingBalance: amount,
       });
     } else {
       operation = Operation.payment({
-        destination: DESTINATION_ADDRESS,
+        destination: destPubKey,
         asset: Asset.native(),
         amount: amount,
       });
     }
   } catch (err) {
     operation = Operation.payment({
-      destination: DESTINATION_ADDRESS,
+      destination: destPubKey,
       asset: Asset.native(),
       amount: amount,
     });
